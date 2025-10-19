@@ -1,5 +1,5 @@
 class GRUModel {
-    constructor(inputShape = [7, 30]) {
+    constructor(inputShape = [7, 90]) { // Updated for 10 tracks × 9 features
         this.model = null;
         this.inputShape = inputShape;
         this.history = {
@@ -10,53 +10,94 @@ class GRUModel {
         };
         this.bestWeights = null;
         this.bestValLoss = Infinity;
+        this.learningRate = 0.001;
     }
 
     buildModel() {
         this.model = tf.sequential({
             layers: [
+                // Input layer with batch normalization
                 tf.layers.gru({
-                    units: 32,
+                    units: 128,
                     returnSequences: true,
                     inputShape: this.inputShape,
                     dropout: 0.3,
                     recurrentDropout: 0.3,
-                    kernelRegularizer: tf.regularizers.l2({l2: 0.01}),
+                    kernelRegularizer: tf.regularizers.l2({l2: 0.001}),
+                    recurrentRegularizer: tf.regularizers.l2({l2: 0.001}),
                     name: 'gru_1'
                 }),
+                
+                // Batch normalization between GRU layers
+                tf.layers.batchNormalization(),
+                
+                // Second GRU layer
                 tf.layers.gru({
-                    units: 32,
+                    units: 64,
+                    returnSequences: false,
                     dropout: 0.3,
                     recurrentDropout: 0.3,
-                    kernelRegularizer: tf.regularizers.l2({l2: 0.01}),
+                    kernelRegularizer: tf.regularizers.l2({l2: 0.001}),
+                    recurrentRegularizer: tf.regularizers.l2({l2: 0.001}),
                     name: 'gru_2'
                 }),
+                
+                // Batch normalization
+                tf.layers.batchNormalization(),
+                
+                // First dense layer
+                tf.layers.dense({
+                    units: 128,
+                    activation: 'relu',
+                    kernelRegularizer: tf.regularizers.l2({l2: 0.001}),
+                    name: 'dense_1'
+                }),
+                tf.layers.dropout({rate: 0.4}),
+                tf.layers.batchNormalization(),
+                
+                // Second dense layer
                 tf.layers.dense({
                     units: 64,
                     activation: 'relu',
-                    kernelRegularizer: tf.regularizers.l2({l2: 0.01}),
-                    name: 'dense_1'
+                    kernelRegularizer: tf.regularizers.l2({l2: 0.001}),
+                    name: 'dense_2'
                 }),
-                tf.layers.dropout({rate: 0.5}),
+                tf.layers.dropout({rate: 0.3}),
+                tf.layers.batchNormalization(),
+                
+                // Third dense layer
                 tf.layers.dense({
-                    units: 30,
+                    units: 32,
+                    activation: 'relu',
+                    kernelRegularizer: tf.regularizers.l2({l2: 0.001}),
+                    name: 'dense_3'
+                }),
+                tf.layers.dropout({rate: 0.2}),
+                
+                // Output layer
+                tf.layers.dense({
+                    units: 30, // 10 tracks × 3 days
                     activation: 'sigmoid',
                     name: 'output'
                 })
             ]
         });
 
+        // NEW: Custom optimizer with learning rate scheduling
+        const optimizer = tf.train.adam(this.learningRate);
+        
         this.model.compile({
-            optimizer: tf.train.adam(0.001),
+            optimizer: optimizer,
             loss: 'binaryCrossentropy',
-            metrics: ['binaryAccuracy']
+            metrics: ['binaryAccuracy', 'precision', 'recall'] // NEW: Additional metrics
         });
 
-        console.log('Model built successfully');
+        console.log('Advanced model built successfully');
+        console.log('Model summary:', this.getModelSummary());
         return this.model;
     }
 
-    async fit(X_train, y_train, X_test, y_test, epochs = 100, batchSize = 32) {
+    async fit(X_train, y_train, X_test, y_test, epochs = 200, batchSize = 32) {
         if (!this.model) {
             this.buildModel();
         }
@@ -65,12 +106,25 @@ class GRUModel {
         this.bestWeights = null;
         this.history = { loss: [], val_loss: [], accuracy: [], val_accuracy: [] };
         
-        const patience = 15;
+        const patience = 25;
         let patienceCounter = 0;
+        let currentLearningRate = this.learningRate;
 
-        console.log('Starting model training with early stopping...');
+        console.log('Starting advanced model training...');
         
         for (let epoch = 0; epoch < epochs; epoch++) {
+            // NEW: Learning rate scheduling
+            if (epoch > 0 && epoch % 30 === 0) {
+                currentLearningRate *= 0.5; // Reduce learning rate every 30 epochs
+                const newOptimizer = tf.train.adam(currentLearningRate);
+                this.model.compile({
+                    optimizer: newOptimizer,
+                    loss: 'binaryCrossentropy',
+                    metrics: ['binaryAccuracy', 'precision', 'recall']
+                });
+                console.log(`Reduced learning rate to: ${currentLearningRate}`);
+            }
+
             const history = await this.model.fit(X_train, y_train, {
                 epochs: 1,
                 batchSize: batchSize,
@@ -88,7 +142,8 @@ class GRUModel {
             this.history.val_loss.push(valLoss);
             this.history.val_accuracy.push(valAccuracy);
 
-            if (valLoss < this.bestValLoss) {
+            // NEW: Improved early stopping with momentum
+            if (valLoss < this.bestValLoss - 0.001) { // Only update if significant improvement
                 this.bestValLoss = valLoss;
                 patienceCounter = 0;
                 this.bestWeights = await this.model.getWeights();
@@ -109,13 +164,14 @@ class GRUModel {
                     accuracy: accuracy,
                     val_loss: valLoss,
                     val_accuracy: valAccuracy,
-                    earlyStopping: patienceCounter
+                    earlyStopping: patienceCounter,
+                    learningRate: currentLearningRate
                 }
             });
             document.dispatchEvent(event);
 
             if ((epoch + 1) % 10 === 0) {
-                console.log(`Epoch ${epoch + 1}/${epochs} - loss: ${loss.toFixed(4)} - accuracy: ${accuracy.toFixed(4)} - val_loss: ${valLoss.toFixed(4)} - val_accuracy: ${valAccuracy.toFixed(4)}`);
+                console.log(`Epoch ${epoch + 1}/${epochs} - LR: ${currentLearningRate.toFixed(6)} - Loss: ${loss.toFixed(4)} - Acc: ${accuracy.toFixed(4)} - Val Loss: ${valLoss.toFixed(4)} - Val Acc: ${valAccuracy.toFixed(4)}`);
             }
         }
 
@@ -148,6 +204,32 @@ class GRUModel {
         };
     }
 
+    // NEW: Ensemble prediction for better accuracy
+    async predictWithUncertainty(X, numSamples = 5) {
+        if (!this.model) {
+            throw new Error('Model not built or loaded');
+        }
+        
+        const predictions = [];
+        for (let i = 0; i < numSamples; i++) {
+            // Enable dropout during inference for uncertainty estimation
+            const prediction = this.model.predict(X, {training: true});
+            predictions.push(prediction);
+        }
+        
+        // Average the predictions
+        let meanPrediction = predictions[0];
+        for (let i = 1; i < predictions.length; i++) {
+            meanPrediction = meanPrediction.add(predictions[i]);
+        }
+        meanPrediction = meanPrediction.div(tf.scalar(predictions.length));
+        
+        // Clean up
+        predictions.forEach(p => p.dispose());
+        
+        return meanPrediction;
+    }
+
     computeTrackSpecificAccuracy(predictions, y_true, trackMetadata) {
         const predData = predictions.arraySync();
         const trueData = y_true.arraySync();
@@ -168,7 +250,7 @@ class GRUModel {
                 for (let dayOffset = 0; dayOffset < 3; dayOffset++) {
                     const predIdx = trackIndex * 3 + dayOffset;
                     const prediction = predData[sampleIdx][predIdx] > 0.5 ? 1 : 0;
-                    const actual = trueData[sampleIdx][predIdx];
+                    const actual = trueData[sampleIdx][predIdx] > 0.5 ? 1 : 0; // Convert probability to binary
                     
                     if (actual !== undefined) {
                         total++;
@@ -212,7 +294,8 @@ class GRUModel {
 
     async computeConsistentAccuracy(predictions, y_true) {
         const binaryPreds = predictions.greater(0.5).cast('float32');
-        const correct = binaryPreds.equal(y_true).sum();
+        const binaryTrue = y_true.greater(0.5).cast('float32');
+        const correct = binaryPreds.equal(binaryTrue).sum();
         const total = tf.size(y_true);
         
         const accuracy = (await correct.data())[0] / (await total.data())[0] * 100;
@@ -220,6 +303,7 @@ class GRUModel {
         correct.dispose();
         total.dispose();
         binaryPreds.dispose();
+        binaryTrue.dispose();
         
         return accuracy;
     }
@@ -227,10 +311,14 @@ class GRUModel {
     getModelSummary() {
         if (!this.model) return 'Model not built';
         
-        let summary = 'Model Architecture:\n';
+        let summary = 'Advanced Model Architecture:\n';
+        let totalParams = 0;
         this.model.layers.forEach((layer, i) => {
-            summary += `${i + 1}. ${layer.name} (${layer.getClassName()}) - Output: ${JSON.stringify(layer.outputShape)}\n`;
+            const params = layer.countParams();
+            totalParams += params;
+            summary += `${i + 1}. ${layer.name} (${layer.getClassName()}) - Params: ${params} - Output: ${JSON.stringify(layer.outputShape)}\n`;
         });
+        summary += `Total Parameters: ${totalParams}`;
         return summary;
     }
 
@@ -239,14 +327,14 @@ class GRUModel {
             throw new Error('No model to save');
         }
         
-        const saveResult = await this.model.save('downloads://music-popularity-model');
-        console.log('Model saved successfully');
+        const saveResult = await this.model.save('downloads://music-popularity-advanced-model');
+        console.log('Advanced model saved successfully');
         return saveResult;
     }
 
     async loadModel(modelArtifacts) {
         this.model = await tf.loadLayersModel(modelArtifacts);
-        console.log('Model loaded successfully');
+        console.log('Advanced model loaded successfully');
         return this.model;
     }
 
