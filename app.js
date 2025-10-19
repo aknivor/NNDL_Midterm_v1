@@ -4,17 +4,16 @@ class MusicPopularityApp {
         this.model = new GRUModel();
         this.isTraining = false;
         this.charts = {};
+        this.trainingData = null;
         
         this.initializeEventListeners();
     }
 
     initializeEventListeners() {
-        // File upload
         document.getElementById('csvFile').addEventListener('change', (e) => {
             this.handleFileUpload(e.target.files[0]);
         });
 
-        // Training controls
         document.getElementById('trainModel').addEventListener('click', () => {
             this.trainModel();
         });
@@ -27,7 +26,10 @@ class MusicPopularityApp {
             this.saveModel();
         });
 
-        // Training progress listener
+        document.getElementById('validateData').addEventListener('click', () => {
+            this.validateData();
+        });
+
         document.addEventListener('trainingProgress', (e) => {
             this.updateTrainingProgress(e.detail);
         });
@@ -40,65 +42,90 @@ class MusicPopularityApp {
             this.showLoading('Loading and processing CSV data...');
             await this.dataLoader.loadCSV(file);
             this.dataLoader.createSlidingWindows();
+            
+            const isValid = this.dataLoader.validateData();
+            if (!isValid) {
+                throw new Error('Data validation failed. Check console for details.');
+            }
+            
+            this.trainingData = this.dataLoader.getTrainingData();
             this.hideLoading();
             
             this.updateDataSummary();
-            this.showNotification('Data loaded successfully!', 'success');
+            this.showNotification('Data loaded and validated successfully!', 'success');
         } catch (error) {
             this.hideLoading();
             this.showNotification('Error loading file: ' + error.message, 'error');
+            console.error('File loading error:', error);
         }
     }
 
     updateDataSummary() {
-        const data = this.dataLoader.getTrainingData();
+        if (!this.trainingData) return;
+        
         const summaryElement = document.getElementById('dataSummary');
+        const trainSamples = this.trainingData.X_train ? this.trainingData.X_train.shape[0] : 0;
+        const testSamples = this.trainingData.X_test ? this.trainingData.X_test.shape[0] : 0;
         
         summaryElement.innerHTML = `
             <div class="summary-grid">
                 <div class="summary-item">
                     <h4>Training Samples</h4>
-                    <p>${data.X_train.shape[0]}</p>
+                    <p>${trainSamples}</p>
                 </div>
                 <div class="summary-item">
                     <h4>Test Samples</h4>
-                    <p>${data.X_test.shape[0]}</p>
+                    <p>${testSamples}</p>
                 </div>
                 <div class="summary-item">
                     <h4>Input Shape</h4>
-                    <p>${data.X_train.shape.slice(1).join(' × ')}</p>
+                    <p>7 × 30</p>
                 </div>
                 <div class="summary-item">
                     <h4>Tracks</h4>
-                    <p>${data.selectedTracks.length}</p>
+                    <p>${this.trainingData.selectedTracks.length}</p>
                 </div>
             </div>
         `;
     }
 
     async trainModel() {
-        if (this.isTraining) return;
+        if (this.isTraining) {
+            this.showNotification('Training already in progress', 'warning');
+            return;
+        }
 
         try {
-            this.isTraining = true;
-            const data = this.dataLoader.getTrainingData();
-            
-            if (!data.X_train) {
+            if (!this.trainingData || !this.trainingData.X_train) {
                 throw new Error('No training data available. Please load CSV file first.');
             }
 
-            this.showLoading('Training model...');
+            this.isTraining = true;
+            this.showLoading('Training model with early stopping...');
             this.initializeTrainingCharts();
             
-            await this.model.fit(data.X_train, data.y_train, data.X_test, data.y_test, 50, 32);
+            document.getElementById('trainModel').disabled = true;
+            document.getElementById('trainingProgress').innerHTML = 
+                '<span style="color: orange;">Training started...</span>';
+            
+            await this.model.fit(
+                this.trainingData.X_train, 
+                this.trainingData.y_train, 
+                this.trainingData.X_test, 
+                this.trainingData.y_test, 
+                100,
+                32
+            );
             
             this.hideLoading();
-            this.showNotification('Model training completed!', 'success');
+            this.showNotification('Model training completed with early stopping!', 'success');
         } catch (error) {
             this.hideLoading();
             this.showNotification('Training error: ' + error.message, 'error');
+            console.error('Training error:', error);
         } finally {
             this.isTraining = false;
+            document.getElementById('trainModel').disabled = false;
         }
     }
 
@@ -106,7 +133,6 @@ class MusicPopularityApp {
         const lossCtx = document.getElementById('lossChart').getContext('2d');
         const accuracyCtx = document.getElementById('accuracyChart').getContext('2d');
 
-        // Clean up existing charts
         if (this.charts.lossChart) this.charts.lossChart.destroy();
         if (this.charts.accuracyChart) this.charts.accuracyChart.destroy();
 
@@ -117,12 +143,14 @@ class MusicPopularityApp {
                     {
                         label: 'Training Loss',
                         borderColor: 'rgb(255, 99, 132)',
-                        data: []
+                        data: [],
+                        tension: 0.4
                     },
                     {
                         label: 'Validation Loss',
                         borderColor: 'rgb(54, 162, 235)',
-                        data: []
+                        data: [],
+                        tension: 0.4
                     }
                 ]
             },
@@ -148,12 +176,14 @@ class MusicPopularityApp {
                     {
                         label: 'Training Accuracy',
                         borderColor: 'rgb(75, 192, 192)',
-                        data: []
+                        data: [],
+                        tension: 0.4
                     },
                     {
                         label: 'Validation Accuracy',
                         borderColor: 'rgb(153, 102, 255)',
-                        data: []
+                        data: [],
+                        tension: 0.4
                     }
                 ]
             },
@@ -187,42 +217,49 @@ class MusicPopularityApp {
             this.charts.accuracyChart.update('none');
         }
 
-        // Update progress text
-        document.getElementById('trainingProgress').textContent = 
-            `Epoch: ${progress.epoch} | Loss: ${progress.loss.toFixed(4)} | Accuracy: ${progress.accuracy.toFixed(4)}`;
+        const earlyStoppingInfo = progress.earlyStopping > 0 ? 
+            ` | Early stopping patience: ${progress.earlyStopping}` : '';
+            
+        document.getElementById('trainingProgress').innerHTML = 
+            `Epoch: ${progress.epoch} | Loss: ${progress.loss.toFixed(4)} | Acc: ${progress.accuracy.toFixed(4)} | Val Loss: ${progress.val_loss.toFixed(4)} | Val Acc: ${progress.val_accuracy.toFixed(4)}${earlyStoppingInfo}`;
     }
 
     async evaluateModel() {
         try {
-            this.showLoading('Evaluating model...');
-            const data = this.dataLoader.getTrainingData();
+            if (!this.trainingData || !this.trainingData.X_test) {
+                throw new Error('No test data available. Please load data and train model first.');
+            }
+
+            this.showLoading('Evaluating model with consistent metrics...');
             
-            const evaluation = await this.model.evaluate(data.X_test, data.y_test);
-            const predictions = await this.model.predict(data.X_test);
-            const trackAccuracies = this.model.computeTrackSpecificAccuracy(
-                predictions, data.y_test, data.trackMetadata
+            const evaluation = await this.model.evaluate(this.trainingData.X_test, this.trainingData.y_test);
+            const predictions = await this.model.predict(this.trainingData.X_test);
+            const consistentAccuracy = await this.model.computeConsistentAccuracy(predictions, this.trainingData.y_test);
+            const accuracyAnalysis = this.model.computeTrackSpecificAccuracy(
+                predictions, this.trainingData.y_test, this.trainingData.trackMetadata
             );
 
-            // Clean up tensors
             predictions.dispose();
 
-            this.displayEvaluationResults(evaluation, trackAccuracies);
-            this.createAccuracyRankingChart(trackAccuracies);
-            this.createHitPotentialMeter(trackAccuracies);
+            this.displayEvaluationResults(evaluation, consistentAccuracy, accuracyAnalysis);
+            this.createAccuracyRankingChart(accuracyAnalysis.trackAccuracies);
+            this.createHitPotentialMeter(accuracyAnalysis.trackAccuracies);
+            this.createDayAccuracyChart(accuracyAnalysis.dayAccuracies);
             
             this.hideLoading();
-            this.showNotification('Model evaluation completed!', 'success');
+            this.showNotification('Model evaluation completed! Metrics are now consistent.', 'success');
         } catch (error) {
             this.hideLoading();
             this.showNotification('Evaluation error: ' + error.message, 'error');
+            console.error('Evaluation error:', error);
         }
     }
 
-    displayEvaluationResults(evaluation, trackAccuracies) {
+    displayEvaluationResults(evaluation, consistentAccuracy, accuracyAnalysis) {
         const resultsElement = document.getElementById('evaluationResults');
         
         let trackAccuracyHTML = '';
-        const sortedAccuracies = Array.from(trackAccuracies.entries())
+        const sortedAccuracies = Array.from(accuracyAnalysis.trackAccuracies.entries())
             .sort((a, b) => b[1].accuracy - a[1].accuracy);
         
         sortedAccuracies.forEach(([trackId, data]) => {
@@ -242,6 +279,7 @@ class MusicPopularityApp {
                 <h4>Overall Model Performance</h4>
                 <p><strong>Loss:</strong> ${evaluation.loss.toFixed(4)}</p>
                 <p><strong>Accuracy:</strong> ${(evaluation.accuracy * 100).toFixed(2)}%</p>
+                <p><strong>Consistent Accuracy:</strong> ${consistentAccuracy.toFixed(2)}%</p>
             </div>
             <div class="track-accuracies">
                 <h4>Track-Specific Accuracy</h4>
@@ -301,14 +339,58 @@ class MusicPopularityApp {
         });
     }
 
+    createDayAccuracyChart(dayAccuracies) {
+        const ctx = document.getElementById('dayAccuracyChart').getContext('2d');
+        
+        if (this.charts.dayAccuracyChart) {
+            this.charts.dayAccuracyChart.destroy();
+        }
+
+        this.charts.dayAccuracyChart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['Day +1', 'Day +2', 'Day +3'],
+                datasets: [{
+                    label: 'Prediction Accuracy (%)',
+                    data: [dayAccuracies.day1, dayAccuracies.day2, dayAccuracies.day3],
+                    backgroundColor: [
+                        'rgba(54, 162, 235, 0.8)',
+                        'rgba(75, 192, 192, 0.8)',
+                        'rgba(153, 102, 255, 0.8)'
+                    ],
+                    borderWidth: 1
+                }]
+            },
+            options: {
+                responsive: true,
+                plugins: {
+                    title: {
+                        display: true,
+                        text: 'Prediction Accuracy by Forecast Day'
+                    }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        title: {
+                            display: true,
+                            text: 'Accuracy (%)'
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     createHitPotentialMeter(trackAccuracies) {
         const meterElement = document.getElementById('hitPotentialMeter');
         const sortedTracks = Array.from(trackAccuracies.entries())
             .sort((a, b) => b[1].accuracy - a[1].accuracy)
-            .slice(0, 5); // Top 5 tracks
+            .slice(0, 5);
 
         meterElement.innerHTML = `
-            <h4>🎵 Hit Potential Meter</h4>
+            <h4>Hit Potential Meter</h4>
             <div class="hit-tracks">
                 ${sortedTracks.map(([trackId, data], index) => `
                     <div class="hit-track-item">
@@ -320,25 +402,27 @@ class MusicPopularityApp {
                                 <span>${data.accuracy.toFixed(1)}% confidence</span>
                             </div>
                         </div>
-                        <div class="hit-potential ${this.getPotentialClass(data.accuracy)}">
-                            ${this.getPotentialText(data.accuracy)}
-                        </div>
                     </div>
                 `).join('')}
             </div>
         `;
     }
 
-    getPotentialClass(accuracy) {
-        if (accuracy >= 80) return 'high-potential';
-        if (accuracy >= 60) return 'medium-potential';
-        return 'low-potential';
-    }
-
-    getPotentialText(accuracy) {
-        if (accuracy >= 80) return 'HIGH POTENTIAL';
-        if (accuracy >= 60) return 'MEDIUM POTENTIAL';
-        return 'LOW POTENTIAL';
+    async validateData() {
+        try {
+            this.showLoading('Validating data integrity...');
+            const isValid = this.dataLoader.validateData();
+            this.hideLoading();
+            
+            if (isValid) {
+                this.showNotification('Data validation passed! All checks OK.', 'success');
+            } else {
+                this.showNotification('Data validation failed. Check console for details.', 'error');
+            }
+        } catch (error) {
+            this.hideLoading();
+            this.showNotification('Validation error: ' + error.message, 'error');
+        }
     }
 
     async saveModel() {
@@ -375,14 +459,12 @@ class MusicPopularityApp {
         this.dataLoader.dispose();
         this.model.dispose();
         
-        // Clean up charts
         Object.values(this.charts).forEach(chart => {
             if (chart && chart.destroy) chart.destroy();
         });
     }
 }
 
-// Initialize app when DOM is loaded
 document.addEventListener('DOMContentLoaded', () => {
     window.musicApp = new MusicPopularityApp();
 });
