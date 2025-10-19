@@ -3,12 +3,13 @@ class DataLoader {
         this.data = null;
         this.tracks = new Set();
         this.dates = new Set();
-        this.processedData = null;
         this.X_train = null;
         this.y_train = null;
         this.X_test = null;
         this.y_test = null;
         this.trackMetadata = new Map();
+        this.normalizationParams = new Map();
+        this.selectedTracks = [];
     }
 
     async loadCSV(file) {
@@ -31,7 +32,6 @@ class DataLoader {
         const lines = csvText.split('\n').filter(line => line.trim());
         const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
         
-        // Find column indices
         const dateIdx = headers.findIndex(h => h.toLowerCase().includes('date'));
         const trackIdx = headers.findIndex(h => h.toLowerCase().includes('track'));
         const streamsIdx = headers.findIndex(h => h.toLowerCase().includes('stream'));
@@ -62,7 +62,6 @@ class DataLoader {
             }
         }
 
-        // Select top 10 tracks by total streams
         this.selectTopTracks(10);
         return this.data;
     }
@@ -95,26 +94,20 @@ class DataLoader {
             trackStreams.set(entry.track_id, current + entry.streams);
         });
 
-        // Convert to array and sort
         const sortedTracks = Array.from(trackStreams.entries())
             .sort((a, b) => b[1] - a[1])
             .slice(0, n)
             .map(entry => entry[0]);
 
         this.selectedTracks = sortedTracks;
-        
-        // Filter data to only include selected tracks
-        this.data = this.data.filter(entry => 
-            this.selectedTracks.includes(entry.track_id)
-        );
+        this.data = this.data.filter(entry => this.selectedTracks.includes(entry.track_id));
 
-        // Store track metadata
         this.selectedTracks.forEach(trackId => {
             const trackData = this.data.find(d => d.track_id === trackId);
             if (trackData) {
                 this.trackMetadata.set(trackId, {
                     id: trackId,
-                    name: trackId, // In real implementation, extract track name
+                    name: trackId,
                     totalStreams: trackStreams.get(trackId)
                 });
             }
@@ -122,27 +115,45 @@ class DataLoader {
     }
 
     normalizeFeatures() {
-        // MinMax normalization per track
+        this.normalizationParams = new Map();
+        const sortedDates = Array.from(this.dates).sort();
+        const splitIndex = Math.floor(sortedDates.length * 0.8);
+        const trainingDates = new Set(sortedDates.slice(0, splitIndex));
+        
         this.selectedTracks.forEach(trackId => {
-            const trackData = this.data.filter(d => d.track_id === trackId);
-            
+            const trackData = this.data.filter(d => d.track_id === trackId && trainingDates.has(d.date));
             const features = ['streams', 'danceability', 'energy'];
+            const params = {};
+            
             features.forEach(feature => {
                 const values = trackData.map(d => d[feature]).filter(v => !isNaN(v));
-                const min = Math.min(...values);
-                const max = Math.max(...values);
-                
-                if (max > min) {
-                    trackData.forEach(entry => {
-                        entry[`${feature}_normalized`] = (entry[feature] - min) / (max - min);
-                    });
-                } else {
-                    trackData.forEach(entry => {
-                        entry[`${feature}_normalized`] = 0.5;
-                    });
-                }
+                const min = values.length > 0 ? Math.min(...values) : 0;
+                const max = values.length > 0 ? Math.max(...values) : 1;
+                params[feature] = { min, max };
             });
+            
+            this.normalizationParams.set(trackId, params);
         });
+
+        this.data.forEach(entry => {
+            const params = this.normalizationParams.get(entry.track_id);
+            if (params) {
+                entry.streams_normalized = this.minMaxNormalize(entry.streams, params.streams);
+                entry.danceability_normalized = this.minMaxNormalize(entry.danceability, params.danceability);
+                entry.energy_normalized = this.minMaxNormalize(entry.energy, params.energy);
+            } else {
+                entry.streams_normalized = 0.5;
+                entry.danceability_normalized = 0.5;
+                entry.energy_normalized = 0.5;
+            }
+        });
+    }
+
+    minMaxNormalize(value, params) {
+        if (params.max > params.min) {
+            return (value - params.min) / (params.max - params.min);
+        }
+        return 0.5;
     }
 
     createSlidingWindows() {
@@ -157,11 +168,10 @@ class DataLoader {
             const currentDate = sortedDates[i];
             const windowDates = sortedDates.slice(i - windowSize, i);
             
-            // Create input sample: [7 days × 30 features]
-            const sample = this.createSample(windowDates, currentDate);
+            const sample = this.createSample(windowDates);
             if (sample) {
                 const target = this.createTarget(currentDate);
-                if (target) {
+                if (target && target.length === this.selectedTracks.length * 3) {
                     samples.push(sample);
                     targets.push(target);
                 }
@@ -171,7 +181,7 @@ class DataLoader {
         this.splitData(samples, targets);
     }
 
-    createSample(windowDates, currentDate) {
+    createSample(windowDates) {
         const sample = [];
         
         for (const date of windowDates) {
@@ -186,14 +196,11 @@ class DataLoader {
                         entry.energy_normalized || 0
                     );
                 } else {
-                    // If data missing, use zeros
                     dayFeatures.push(0, 0, 0);
                 }
             }
             
-            if (dayFeatures.length === this.selectedTracks.length * 3) {
-                sample.push(dayFeatures);
-            }
+            sample.push(dayFeatures);
         }
 
         return sample.length === windowDates.length ? sample : null;
@@ -201,15 +208,12 @@ class DataLoader {
 
     createTarget(currentDate) {
         const target = [];
-        const currentDateIndex = Array.from(this.dates).sort().indexOf(currentDate);
         const sortedDates = Array.from(this.dates).sort();
+        const currentDateIndex = sortedDates.indexOf(currentDate);
         
         for (const trackId of this.selectedTracks) {
             const currentEntry = this.data.find(d => d.date === currentDate && d.track_id === trackId);
-            if (!currentEntry) {
-                target.push(0, 0, 0);
-                continue;
-            }
+            if (!currentEntry) return null;
 
             const currentStreams = currentEntry.streams;
             
@@ -217,15 +221,15 @@ class DataLoader {
                 const futureDate = sortedDates[currentDateIndex + offset];
                 const futureEntry = this.data.find(d => d.date === futureDate && d.track_id === trackId);
                 
-                if (futureEntry && futureEntry.streams > currentStreams) {
-                    target.push(1);
+                if (futureEntry) {
+                    target.push(futureEntry.streams > currentStreams ? 1 : 0);
                 } else {
-                    target.push(0);
+                    return null;
                 }
             }
         }
 
-        return target.length === this.selectedTracks.length * 3 ? target : null;
+        return target;
     }
 
     splitData(samples, targets, trainRatio = 0.8) {
@@ -235,6 +239,17 @@ class DataLoader {
         this.y_train = tf.tensor2d(targets.slice(0, splitIndex));
         this.X_test = tf.tensor3d(samples.slice(splitIndex));
         this.y_test = tf.tensor2d(targets.slice(splitIndex));
+        
+        this.logDataStatistics();
+    }
+
+    logDataStatistics() {
+        if (this.X_train && this.y_train) {
+            const trainPositives = this.y_train.sum().dataSync()[0];
+            const trainTotal = this.y_train.shape[0] * this.y_train.shape[1];
+            const trainPositiveRatio = (trainPositives / trainTotal) * 100;
+            console.log(`Training set - Positive samples: ${trainPositiveRatio.toFixed(2)}%`);
+        }
     }
 
     getTrainingData() {
@@ -246,6 +261,21 @@ class DataLoader {
             trackMetadata: this.trackMetadata,
             selectedTracks: this.selectedTracks
         };
+    }
+
+    validateData() {
+        const data = this.getTrainingData();
+        
+        const hasNaN = (tensor) => {
+            if (!tensor) return true;
+            const nanCheck = tf.isNaN(tensor).any();
+            return nanCheck.dataSync()[0];
+        };
+        
+        console.log("Train has NaN:", hasNaN(data.X_train));
+        console.log("Test has NaN:", hasNaN(data.X_test));
+        
+        return !hasNaN(data.X_train) && !hasNaN(data.X_test);
     }
 
     dispose() {
